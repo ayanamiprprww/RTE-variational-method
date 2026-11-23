@@ -3,8 +3,9 @@ using Plots
 using SparseArrays
 using Test
 
-σ(x::Float64) = 1
-σₛ(x::Float64) = 0.
+σ(x::Float64) = 2 + x
+σₛ(x::Float64) = .5
+f(x, μ) = 2 - .5 * x
 
 ncell_x = 64
 ncell_μ = 32
@@ -257,6 +258,47 @@ function SpatialMassAssembly!(Mass_1, Mass_2, Mass_3, cellValues_x::CellValues, 
 
 end
 
+
+function SourceTermAssembly(source_term, dh_x::DofHandler, dh_μ::DofHandler, cellValues_x::CellValues, cellValues_μ::CellValues)
+    nbasefucntions_x = getnbasefunctions(cellValues_x)
+    nbasefucntions_μ = getnbasefunctions(cellValues_μ)
+    
+    source_load = zeros(Float64, ndofs(dh_x) * ndofs(dh_μ))
+    fe = zeros(nbasefucntions_x * nbasefucntions_μ)
+
+    for cell_x in CellIterator(dh_x), cell_μ in CellIterator(dh_μ)
+        fill!(fe, 0.0)
+        reinit!(cellValues_x, cell_x)
+        reinit!(cellValues_μ, cell_μ)
+        cell_dofs_x = celldofs(cell_x)
+        cell_dofs_μ = celldofs(cell_μ)
+        dofs = [(j - 1) * ndofs(dh_μ) + k for j in cell_dofs_x for k in cell_dofs_μ]
+
+        for qp_x in 1:getnquadpoints(cellValues_x), qp_μ in 1:getnquadpoints(cellValues_μ)
+            dV = getdetJdV(cellValues_x, qp_x)
+            dV_μ = getdetJdV(cellValues_μ, qp_μ)
+            qp_coord_x = spatial_coordinate(cellValues_x, qp_x, getcoordinates(cell_x))[1]
+            qp_coord_μ = spatial_coordinate(cellValues_μ, qp_μ, getcoordinates(cell_μ))[1]
+            source = source_term(qp_coord_x, qp_coord_μ)
+
+            for itp_x_j in 1:nbasefucntions_x, itp_μ_k in 1:nbasefucntions_μ
+                Φ_j = shape_value(cellValues_x, qp_x, itp_x_j)
+                ψ_k = shape_value(cellValues_μ, qp_μ, itp_μ_k)
+                fe[(itp_x_j - 1) * nbasefucntions_μ + itp_μ_k] += source *Φ_j * ψ_k * dV * dV_μ
+            end
+        
+        end
+    
+        source_load[dofs] .+= fe
+    
+    end
+
+    return source_load
+end
+
+
+
+
 function assemble_global_matrix(
     dh_x, dh_μ, 
     outflow_dofs, outflow_map,
@@ -299,6 +341,7 @@ function assemble_global_matrix(
     dropzeros!(M)
     return M
 end
+
 
 ###############################################################################
 ###############################################################################
@@ -419,13 +462,13 @@ M = assemble_global_matrix(
 
 # @test M2 ≈ M
 
-load_vector = zeros(ndofs(dh_x) * ndofs(dh_μ))
+inflow_load_vector = zeros(ndofs(dh_x) * ndofs(dh_μ))
 
 # Inflow boundary condition
 # defined for (x = 0 and μ > 0) and (x = 1 and μ < 0)
 inflow_data = Dict()
 for j in eachindex(inflow_spatial_dof)
-    inflow_data[inflow_spatial_dof[j]] = ones(length(inflow_spatial_dof_to_inflow_ang_dof[inflow_spatial_dof[j]]))
+    inflow_data[inflow_spatial_dof[j]] = .5 .* [1. for k in 1:length(inflow_spatial_dof_to_inflow_ang_dof[inflow_spatial_dof[j]])]
 end
 
 # inflow trace
@@ -434,13 +477,16 @@ for (m, n) in inflow_dofs
     for k in eachindex(inflow_spatial_dof_to_inflow_ang_dof[m])
         spatial_dof = m
         ang_dof = inflow_spatial_dof_to_inflow_ang_dof[spatial_dof][k]
-        load_vector[(m-1)*ndofs(dh_μ) + n] += inflow_data[spatial_dof][k] * angular_mass_absμ[n, ang_dof]
+        inflow_load_vector[(m-1)*ndofs(dh_μ) + n] += inflow_data[spatial_dof][k] * angular_mass_absμ[n, ang_dof]
     end
 end
 end
 
+# source
+@time source_load_vector = SourceTermAssembly(f, dh_x, dh_μ, cellValues_x, cellValues_μ)
+
 begin
-sol_vec = M \ load_vector
+sol_vec = M \ (inflow_load_vector + source_load_vector)
 end
 
 sol = Matrix{Float64}(undef, ndofs(dh_x), ndofs(dh_μ))
@@ -463,11 +509,8 @@ end
 # heatmap(sol, c=:thermal, dpi = 200)
 # plot(sol[1, :], dpi = 200)
 
-fluxes = sol * ψ_flux
-plot(fluxes, dpi = 200)
-
-# μ_centers = [spatial_coordinate(cellValues_μ, 1, getcoordinates(cell))[1] for cell in CellIterator(dh_μ)]
-# plot(μ_centers, sol[1, :], xlabel="μ", ylabel="φ(0, μ)", label="Weak Robin BC", lw=2, dpi=200)
+fluxes = sol * ψ_flux;
+# plot(fluxes, dpi = 200)
 
 # using BenchmarkTools
 # @btime AngularMassAssembly!(K_μ, cellValues_μ, dh_μ) evals = 10 setup = (fill!(K_μ, 0.))
