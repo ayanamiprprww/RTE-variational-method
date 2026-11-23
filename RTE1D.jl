@@ -3,12 +3,12 @@ using Plots
 using SparseArrays
 using Test
 
-σ(x::Float64) = 2 + x
-σₛ(x::Float64) = .5
-f(x, μ) = 2 - .5 * x
+σ(x::Float64) = 2 - x
+σₛ(x::Float64) = (.5) * 1
+f(x, μ) = (2) * 1
 
 ncell_x = 64
-ncell_μ = 32
+ncell_μ = 256
 
 
 ###############################################################################
@@ -258,7 +258,25 @@ function SpatialMassAssembly!(Mass_1, Mass_2, Mass_3, cellValues_x::CellValues, 
 
 end
 
+"""
+    Computes ∫ f(μ) dμ (μ ∈ (-1, 1)), where f is a function of (only) μ.
+"""
+function AngularIntegrate1D(f, dh_μ::DofHandler, cellValues_μ::CellValues)
+    res = 0.
+    for cell_μ in CellIterator(dh_μ)
+        reinit!(cellValues_μ, cell_μ)
+        for qp in 1:getnquadpoints(cellValues_μ)
+            dV = getdetJdV(cellValues_μ, qp)
+            qp_coord = spatial_coordinate(cellValues_μ, qp, getcoordinates(cell_μ))[1]
+            res += f(qp_coord) * dV
+        end
+    end
+    return res
+end
 
+"""
+    Assemble the load vector for the source term f: (f, w) + (T^{-1} f, s⋅∇w), where w is the test function.
+"""
 function SourceTermAssembly(source_term, dh_x::DofHandler, dh_μ::DofHandler, cellValues_x::CellValues, cellValues_μ::CellValues)
     nbasefucntions_x = getnbasefunctions(cellValues_x)
     nbasefucntions_μ = getnbasefunctions(cellValues_μ)
@@ -279,12 +297,21 @@ function SourceTermAssembly(source_term, dh_x::DofHandler, dh_μ::DofHandler, ce
             dV_μ = getdetJdV(cellValues_μ, qp_μ)
             qp_coord_x = spatial_coordinate(cellValues_x, qp_x, getcoordinates(cell_x))[1]
             qp_coord_μ = spatial_coordinate(cellValues_μ, qp_μ, getcoordinates(cell_μ))[1]
-            source = source_term(qp_coord_x, qp_coord_μ)
+            source_val = source_term(qp_coord_x, qp_coord_μ)
+            ∫sourcedμ = AngularIntegrate1D(μ -> source_term(qp_coord_x, μ), dh_μ, cellValues_μ)
+
+            w1 = 1/σ(qp_coord_x)
+            w2 = σₛ(qp_coord_x) / ( 2 * σ(qp_coord_x) * (σ(qp_coord_x) - σₛ(qp_coord_x)) )
+            μ_val = qp_coord_μ
 
             for itp_x_j in 1:nbasefucntions_x, itp_μ_k in 1:nbasefucntions_μ
-                Φ_j = shape_value(cellValues_x, qp_x, itp_x_j)
-                ψ_k = shape_value(cellValues_μ, qp_μ, itp_μ_k)
-                fe[(itp_x_j - 1) * nbasefucntions_μ + itp_μ_k] += source *Φ_j * ψ_k * dV * dV_μ
+                Φ_j  = shape_value(cellValues_x, qp_x, itp_x_j)
+                ∇Φ_j = shape_gradient(cellValues_x, qp_x, itp_x_j)[1]
+                ψ_k  = shape_value(cellValues_μ, qp_μ, itp_μ_k)
+                fe[(itp_x_j - 1) * nbasefucntions_μ + itp_μ_k] += (
+                    source_val * Φ_j * ψ_k * dV * dV_μ + 
+                    (w1 * source_val + w2 * ∫sourcedμ) * μ_val * ∇Φ_j * ψ_k * dV * dV_μ
+                    )
             end
         
         end
@@ -295,8 +322,6 @@ function SourceTermAssembly(source_term, dh_x::DofHandler, dh_μ::DofHandler, ce
 
     return source_load
 end
-
-
 
 
 function assemble_global_matrix(
@@ -468,7 +493,7 @@ inflow_load_vector = zeros(ndofs(dh_x) * ndofs(dh_μ))
 # defined for (x = 0 and μ > 0) and (x = 1 and μ < 0)
 inflow_data = Dict()
 for j in eachindex(inflow_spatial_dof)
-    inflow_data[inflow_spatial_dof[j]] = .5 .* [1. for k in 1:length(inflow_spatial_dof_to_inflow_ang_dof[inflow_spatial_dof[j]])]
+    inflow_data[inflow_spatial_dof[j]] = 1. .* [1. for k in 1:length(inflow_spatial_dof_to_inflow_ang_dof[inflow_spatial_dof[j]])]
 end
 
 # inflow trace
